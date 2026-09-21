@@ -70,3 +70,29 @@ test("a real (non-mock) $0 price never wins a tiebreak either — treated as unp
   const ranked = rankCandidates(line({ kind: "jack" }), [zeroPrice, realPrice]);
   assert.equal(ranked[0].part.supplierPartNumber, "REAL-PRICED");
 });
+
+test("capacitor: 'Capacitor Electrolytic' description demotes a matching-value ceramic part to 'possible'", () => {
+  // Regression test for a real bug found via live testing: a "10uF
+  // Electrolytic" line matched a real ceramic 0402 capacitor at "exact"
+  // confidence purely because the farad value matched — wrong physical type.
+  const ceramic = part({ description: "CAP CER 10UF 6.3V X5R 0402", price: "¥17" });
+  const electrolytic = part({ description: "CAP ALUM 10UF 20% 16V RADIAL", price: "¥25" });
+  const ranked = rankCandidates(
+    line({ kind: "capacitor", description: "Capacitor Electrolytic", value: "10uF" }),
+    [ceramic, electrolytic],
+  );
+  assert.equal(ranked[0].part.description, electrolytic.description);
+  assert.equal(ranked[0].confidence, "exact");
+  const ceramicResult = ranked.find((r) => r.part.description === ceramic.description);
+  assert.equal(ceramicResult?.confidence, "possible");
+});
+
+test("capacitor: a bare 'Ceramic' description (no 'Capacitor' prefix) still applies the ceramic type hint", () => {
+  const ceramic = part({ description: "CAP CER 0.01UF 50V X7R 0603" });
+  const electrolytic = part({ description: "CAP ALUM 0.01UF 20% 50V RADIAL" });
+  const ranked = rankCandidates(
+    line({ kind: "capacitor", description: "Ceramic", value: "0.01uF" }),
+    [electrolytic, ceramic],
+  );
+  assert.equal(ranked[0].part.description, ceramic.description);
+});

@@ -107,7 +107,38 @@ export function rankCandidates(line: ParsedBomLine, candidates: SupplierPart[]):
 
   if (line.kind === "capacitor") {
     const target = parseCapacitanceFarads(line.value);
-    return scoreByExtractedValue(candidates, target, extractCapacitanceFarads);
+    const ranked = scoreByExtractedValue(candidates, target, extractCapacitanceFarads);
+
+    // Real bug found via live testing (not caught by unit tests): a "10uF"
+    // Electrolytic line matched a real 0402 ceramic capacitor at "exact"
+    // confidence — same value, wrong physical type, not actually the right
+    // part for a build calling for an electrolytic. Unlike smart-bom's
+    // pedal-BOM parser (which has to guess a type hint from a parenthetical
+    // note buried in the value column), the Eurorack BOM format states the
+    // type directly in the Description column ("Capacitor Electrolytic",
+    // "Capacitor Ceramic", or bare "Ceramic") — use that directly instead.
+    const descLower = line.description.toLowerCase();
+    const typeHint = descLower.includes("electrolytic")
+      ? "electrolytic"
+      : descLower.includes("ceramic")
+        ? "ceramic"
+        : null;
+    if (!typeHint) return ranked;
+
+    return ranked
+      .map((candidate) => {
+        if (candidate.confidence !== "exact") return candidate;
+        const partDesc = candidate.part.description.toLowerCase();
+        // Real supplier descriptions abbreviate as often as they spell out
+        // the type ("CAP CER 0.1UF", "CAP ALUM 10UF") — verified live
+        // against both Mouser and DigiKey results this session.
+        const matchesType =
+          typeHint === "electrolytic"
+            ? /electrolytic|tantalum|\balum\b/.test(partDesc)
+            : /ceramic|mlcc|film|\bcer\b/.test(partDesc);
+        return matchesType ? candidate : { ...candidate, confidence: "possible" as const };
+      })
+      .sort(byConfidenceThenPrice);
   }
 
   if (line.kind === "potentiometer") {
