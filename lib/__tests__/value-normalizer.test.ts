@@ -32,6 +32,19 @@ test("parseCapacitanceFarads: standard notation", () => {
   assertCloseTo(parseCapacitanceFarads("470pF"), 470e-12);
 });
 
+// Regression test: found via a sibling project (rc2014-bom) reusing this
+// same file — real Mouser/DigiKey descriptions routinely write units in
+// caps ("100NF", "0.1UF"), and the unit lookup used to be case-sensitive,
+// so an uppercase unit silently missed SI_PREFIX's lowercase keys and fell
+// through to the 1e-6 (micro) default. "100NF" parsed as 100 microfarads
+// instead of 100 nanofarads — a 1000x error that could produce a false
+// "exact" match against the wrong real supplier part in match-ranker.ts.
+test("parseCapacitanceFarads: standard notation with uppercase unit letters", () => {
+  assertCloseTo(parseCapacitanceFarads("100NF"), 100e-9);
+  assertCloseTo(parseCapacitanceFarads("0.1UF"), 0.1e-6);
+  assertCloseTo(parseCapacitanceFarads("470PF"), 470e-12);
+});
+
 test("parseCapacitanceFarads: EIA 3-digit code", () => {
   // 104 = 10 * 10^4 pF = 100,000pF = 0.1uF
   assertCloseTo(parseCapacitanceFarads("104"), 0.1e-6);

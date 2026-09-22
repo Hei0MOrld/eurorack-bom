@@ -98,7 +98,19 @@ export function parseCapacitanceFarads(raw: string): number | null {
     // for capacitors; a code-review pass caught that this silently parsed a
     // bare value as literal Farads instead. Handle the empty-unit case
     // explicitly rather than relying on the shared lookup's default.
-    const multiplier = unitChar === "" ? 1e-6 : (SI_PREFIX[unitChar] ?? 1e-6);
+    //
+    // unitChar is lowercased before the SI_PREFIX lookup — found live while
+    // building rc2014-bom (this exact file is duplicated there): real
+    // supplier descriptions routinely write units in caps ("100NF",
+    // "0.1UF"), and SI_PREFIX's keys are lowercase, so an uppercase unit
+    // silently missed the lookup and fell through to the 1e-6 (micro)
+    // default — parsing "100NF" as 100 microfarads instead of 100
+    // nanofarads, a 1000x error, which could produce a false "exact" match
+    // in match-ranker.ts against the wrong-value real supplier part.
+    // Unlike resistors ("M" vs "m" genuinely mean mega vs milli), capacitor
+    // unit letters have no case-distinct alternate meaning, so lowercasing
+    // here is always safe.
+    const multiplier = unitChar === "" ? 1e-6 : (SI_PREFIX[unitChar.toLowerCase()] ?? 1e-6);
     return parseFloat(num) * multiplier;
   }
 
