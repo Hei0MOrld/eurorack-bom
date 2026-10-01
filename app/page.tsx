@@ -76,6 +76,9 @@ export default function Home() {
         supplier: candidate.part.supplier,
         supplierPartNumber: candidate.part.supplierPartNumber,
         quantity: r.line.quantity,
+        note: [r.line.description, r.line.value, r.line.note]
+          .filter(Boolean)
+          .join(" "),
       };
       return selection;
     });
@@ -281,8 +284,10 @@ export default function Home() {
                   >
                     BOM tool
                   </a>{" "}
-                  while signed in — repeated part numbers are grouped into
-                  quantities automatically.
+                  while signed in —{" "}
+                  {supplier === "digikey"
+                    ? "tab-separated columns: part number, quantity, note."
+                    : "repeated part numbers are grouped into quantities automatically."}
                 </p>
                 <textarea
                   readOnly

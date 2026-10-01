@@ -11,6 +11,9 @@ export interface CartSelection {
   supplier: SupplierPart["supplier"];
   supplierPartNumber: string;
   quantity: number;
+  // Optional free-text label (e.g. the BOM line's description and value).
+  // Only used by the DigiKey list, where it becomes the third column.
+  note?: string;
 }
 
 export function buildMouserPasteList(selections: CartSelection[]): string {
@@ -22,13 +25,39 @@ export function buildMouserPasteList(selections: CartSelection[]): string {
   return lines.join("\n");
 }
 
-// DigiKey's MyLists bulk-add accepts a similar plain paste (one part number
-// per line, no separate quantity column — same repeat-N-times convention).
-// NOT yet verified against a live DigiKey account (no key yet) — confirm
-// the exact import UI/format once DIGIKEY_CLIENT_ID/SECRET are set and there's
-// a real account to test the "paste list" flow against.
+// DigiKey list: tab-separated rows of part number, quantity, and (only if
+// any row has one) a note. Tabs rather than commas because notes come from
+// BOM text that often contains commas ("SPDT, Momentary Spring Return
+// Switch"), and tab-separated text also pastes straight into a spreadsheet
+// as columns. Rows are merged only when both the part number AND the note
+// match, so the same part picked for two BOM lines with different notes
+// (e.g. a matched set vs. general use) stays on two separate rows.
+// NOT yet verified against a live DigiKey account — confirm the import UI
+// accepts this column order once there's a real account to test against.
 export function buildDigiKeyPasteList(selections: CartSelection[]): string {
-  return buildMouserPasteList(selections); // same repeat-N-times format, kept as a separate export so call sites read clearly and the two can diverge later if DigiKey's real import format turns out different
+  const rows = new Map<string, { pn: string; quantity: number; note: string }>();
+  for (const { supplierPartNumber, quantity, note } of selections) {
+    const pn = supplierPartNumber.trim();
+    if (!pn || quantity < 1) continue;
+    const cleanNote = cleanCell(note ?? "");
+    const key = `${pn}\t${cleanNote}`;
+    const row = rows.get(key) ?? { pn, quantity: 0, note: cleanNote };
+    row.quantity += quantity;
+    rows.set(key, row);
+  }
+  const includeNotes = [...rows.values()].some((r) => r.note !== "");
+  return [...rows.values()]
+    .map(({ pn, quantity, note }) => {
+      const cells = [pn, String(quantity)];
+      if (includeNotes) cells.push(note);
+      return cells.join("\t");
+    })
+    .join("\n");
+}
+
+// Tabs or newlines inside a note would break the column layout.
+function cleanCell(text: string): string {
+  return text.replace(/[\t\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 
 // Splits a flat selection list into one paste list per supplier, since a
