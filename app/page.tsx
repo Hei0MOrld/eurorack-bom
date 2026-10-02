@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import type { ParsedBomLine } from "@/lib/bom-parser";
-import type { RankedCandidate } from "@/lib/match-ranker";
+import { defaultCandidateIndex, type RankedCandidate } from "@/lib/match-ranker";
+import { formatRequirement } from "@/lib/package";
 import { buildPasteListsBySupplier, type CartSelection } from "@/lib/cart-builder";
 import { DIGIKEY_SITES, type DigiKeySite } from "@/lib/digikey-client";
 
@@ -39,6 +40,46 @@ const SAMPLE_BOM = `| Description | Value | Quantity | |
 | Header | 2.54mm Male 1x5 | 2 | Connector Main Board |`;
 
 const SKIP = "__skip__";
+// Shown as the selection when no candidate was picked by default because
+// every top candidate is a confirmed package mismatch.
+const NONE = "__none__";
+
+// Kinds where the same part number commonly comes in several packages, so
+// a BOM line that doesn't name one is worth pointing out.
+const PACKAGE_SENSITIVE_KINDS = new Set(["ic", "transistor", "diode", "other"]);
+
+// The dropdown value for line i: the user's choice if they made one,
+// otherwise the default pick (or NONE when there is no safe default).
+function selectionFor(selections: Record<number, string>, r: MatchResult, i: number): string {
+  const explicit = selections[i];
+  if (explicit !== undefined) return explicit;
+  const d = defaultCandidateIndex(r.candidates);
+  return d === null ? NONE : String(d);
+}
+
+function chosenCandidate(
+  selections: Record<number, string>,
+  r: MatchResult,
+  i: number,
+): RankedCandidate | undefined {
+  const sel = selectionFor(selections, r, i);
+  if (sel === SKIP || sel === NONE) return undefined;
+  return r.candidates[parseInt(sel, 10)];
+}
+
+function packageLabel(c: RankedCandidate): string {
+  const found = c.pkg.found ?? "?";
+  switch (c.pkg.status) {
+    case "match":
+      return `pkg ✓ ${found}`;
+    case "mismatch":
+      return `pkg ✗ ${found}`;
+    case "unknown":
+      return `pkg ? ${c.pkg.found ?? ""}`.trim();
+    default:
+      return c.pkg.found ? `pkg ${c.pkg.found}` : "pkg ?";
+  }
+}
 
 export default function Home() {
   const [bomText, setBomText] = useState(SAMPLE_BOM);
@@ -68,9 +109,7 @@ export default function Home() {
   const pasteListsBySupplier = useMemo(() => {
     if (!results) return {};
     const chosen = results.map((r, i) => {
-      const sel = selections[i] ?? "0";
-      if (sel === SKIP) return null;
-      const candidate = r.candidates[parseInt(sel, 10)];
+      const candidate = chosenCandidate(selections, r, i);
       if (!candidate) return null;
       const selection: CartSelection = {
         supplier: candidate.part.supplier,
@@ -96,9 +135,7 @@ export default function Home() {
     let anyPriced = false;
     const currencySymbols = new Set<string>();
     results.forEach((r, i) => {
-      const sel = selections[i] ?? "0";
-      if (sel === SKIP) return;
-      const candidate = r.candidates[parseInt(sel, 10)];
+      const candidate = chosenCandidate(selections, r, i);
       if (!candidate) return;
       const symbol = candidate.part.price.replace(/[\d.,\s]/g, "");
       const price = parseFloat(candidate.part.price.replace(/[^\d.]/g, ""));
@@ -111,6 +148,30 @@ export default function Home() {
     if (!anyPriced) return null;
     if (currencySymbols.size > 1) return { mixed: true as const };
     return { mixed: false as const, symbol: [...currencySymbols][0] ?? "", total };
+  }, [results, selections]);
+
+  // Counts for the package summary above the results table.
+  const packageSummary = useMemo(() => {
+    if (!results) return null;
+    let mismatched = 0;
+    let unconfirmed = 0;
+    let leftOut = 0;
+    let unspecified = 0;
+    results.forEach((r, i) => {
+      if (r.candidates.length === 0) return;
+      const sel = selectionFor(selections, r, i);
+      if (sel === SKIP) return;
+      if (sel === NONE) {
+        leftOut++;
+        return;
+      }
+      const c = r.candidates[parseInt(sel, 10)];
+      if (!c) return;
+      if (c.pkg.status === "mismatch") mismatched++;
+      else if (c.pkg.status === "unknown") unconfirmed++;
+      else if (c.pkg.status === "unspecified" && PACKAGE_SENSITIVE_KINDS.has(r.line.kind)) unspecified++;
+    });
+    return { mismatched, unconfirmed, leftOut, unspecified };
   }, [results, selections]);
 
   async function handleCopy(supplier: CartSelection["supplier"]) {
@@ -182,6 +243,37 @@ export default function Home() {
 
         {results && (
           <>
+            {packageSummary &&
+              packageSummary.mismatched + packageSummary.unconfirmed + packageSummary.leftOut + packageSummary.unspecified > 0 && (
+                <div className="flex flex-col gap-1 rounded-lg border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-600 dark:bg-amber-950 dark:text-amber-200">
+                  <p className="font-semibold">Package check</p>
+                  {packageSummary.leftOut > 0 && (
+                    <p>
+                      ✗ {packageSummary.leftOut} line{packageSummary.leftOut === 1 ? "" : "s"} had no
+                      candidate in the required package and {packageSummary.leftOut === 1 ? "is" : "are"}{" "}
+                      left out of the cart lists until you pick a part or skip.
+                    </p>
+                  )}
+                  {packageSummary.mismatched > 0 && (
+                    <p>
+                      ✗ {packageSummary.mismatched} chosen part{packageSummary.mismatched === 1 ? " is" : "s are"} in
+                      a different package than the BOM asks for.
+                    </p>
+                  )}
+                  {packageSummary.unconfirmed > 0 && (
+                    <p>
+                      ⚠ {packageSummary.unconfirmed} chosen part{packageSummary.unconfirmed === 1 ? "'s" : "s'"} package
+                      couldn&apos;t be confirmed against the BOM — check before ordering.
+                    </p>
+                  )}
+                  {packageSummary.unspecified > 0 && (
+                    <p className="text-amber-800 dark:text-amber-300">
+                      {packageSummary.unspecified} IC/semiconductor line{packageSummary.unspecified === 1 ? " doesn't" : "s don't"}{" "}
+                      say which package — the cheapest version was picked.
+                    </p>
+                  )}
+                </div>
+              )}
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-300 text-left dark:border-zinc-700">
@@ -205,21 +297,27 @@ export default function Home() {
                         <div className="flex flex-col gap-1">
                           <select
                             className="w-full max-w-md rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                            value={selections[i] ?? "0"}
+                            value={selectionFor(selections, r, i)}
                             onChange={(e) =>
                               setSelections((s) => ({ ...s, [i]: e.target.value }))
                             }
                           >
+                            {selectionFor(selections, r, i) === NONE && (
+                              <option value={NONE} disabled>
+                                — no part in the required package; choose one —
+                              </option>
+                            )}
                             {r.candidates.slice(0, 5).map((c, ci) => (
                               <option key={ci} value={ci}>
-                                [{c.confidence}] [{SUPPLIER_LABEL[c.part.supplier]}]{" "}
+                                [{c.confidence}] [{packageLabel(c)}] [{SUPPLIER_LABEL[c.part.supplier]}]{" "}
                                 {c.part.price} — {c.part.description}
                               </option>
                             ))}
                             <option value={SKIP}>— skip this line —</option>
                           </select>
+                          <PackageNote result={r} chosen={chosenCandidate(selections, r, i)} noneChosen={selectionFor(selections, r, i) === NONE} />
                           {(() => {
-                            const chosen = r.candidates[parseInt(selections[i] ?? "0", 10)];
+                            const chosen = chosenCandidate(selections, r, i);
                             if (!chosen) return null;
                             return (
                               <a
@@ -242,7 +340,7 @@ export default function Home() {
                     </td>
                     <td className="py-2 pr-4">
                       {(() => {
-                        const chosen = r.candidates[parseInt(selections[i] ?? "0", 10)];
+                        const chosen = chosenCandidate(selections, r, i);
                         if (!chosen) return null;
                         return `${chosen.part.price} (${SUPPLIER_LABEL[chosen.part.supplier]})`;
                       })()}
@@ -307,4 +405,62 @@ export default function Home() {
       </main>
     </div>
   );
+}
+
+// One line under each BOM row saying what package the BOM asks for and
+// whether the chosen part is confirmed to be in it.
+function PackageNote({
+  result,
+  chosen,
+  noneChosen,
+}: {
+  result: MatchResult;
+  chosen: RankedCandidate | undefined;
+  noneChosen: boolean;
+}) {
+  const req = result.line.packageRequirement ?? [];
+  const needs = req.length > 0 ? `Needs ${formatRequirement(req)}.` : null;
+  const from = chosen?.pkg.source ? ` (from ${chosen.pkg.source})` : "";
+
+  if (noneChosen) {
+    return (
+      <span className="text-xs text-red-600 dark:text-red-400">
+        ✗ {needs} No candidate is confirmed in that package — left out of the cart lists. Pick one
+        anyway or skip the line.
+      </span>
+    );
+  }
+  if (!chosen) return null;
+
+  switch (chosen.pkg.status) {
+    case "match":
+      return (
+        <span className="text-xs text-green-700 dark:text-green-400">
+          ✓ {needs} This part is {chosen.pkg.found}
+          {from}.
+        </span>
+      );
+    case "mismatch":
+      return (
+        <span className="text-xs text-red-600 dark:text-red-400">
+          ✗ {needs} This part is {chosen.pkg.found}
+          {from}.
+        </span>
+      );
+    case "unknown":
+      return (
+        <span className="text-xs text-amber-600 dark:text-amber-500">
+          ⚠ {needs} This part&apos;s package couldn&apos;t be confirmed
+          {chosen.pkg.found ? ` (only “${chosen.pkg.found}”${from})` : ""} — check the product page.
+        </span>
+      );
+    default:
+      if (!PACKAGE_SENSITIVE_KINDS.has(result.line.kind)) return null;
+      return (
+        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          BOM doesn&apos;t name a package.
+          {chosen.pkg.found ? ` This part is ${chosen.pkg.found}${from}.` : " This part's package is unknown."}
+        </span>
+      );
+  }
 }

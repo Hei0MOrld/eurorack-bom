@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rankCandidates } from "../match-ranker.ts";
+import { rankCandidates, defaultCandidateIndex } from "../match-ranker.ts";
 import type { SupplierPart } from "../supplier-types.ts";
 import type { ParsedBomLine } from "../bom-parser.ts";
 
@@ -26,6 +26,7 @@ function line(overrides: Partial<ParsedBomLine>): ParsedBomLine {
     value: "",
     quantity: 1,
     note: "",
+    packageRequirement: [],
     ...overrides,
   };
 }
@@ -95,4 +96,51 @@ test("capacitor: a bare 'Ceramic' description (no 'Capacitor' prefix) still appl
     [electrolytic, ceramic],
   );
   assert.equal(ranked[0].part.description, ceramic.description);
+});
+
+// Package ranking. The reported bug: a DIP-14 line got a SOIC-14 part,
+// because every TL074 variant was "exact" and the SOIC was cheapest.
+const dipLine = () =>
+  line({ kind: "ic", value: "TL074", packageRequirement: [{ family: "DIP", pins: 14 }] });
+
+test("a cheaper wrong-package part no longer beats the right package", () => {
+  const soic = part({ supplierPartNumber: "SOIC", price: "$0.40", description: "IC OPAMP JFET 4 CIRCUIT 14SOIC", manufacturerPartNumber: "TL074CDR" });
+  const dip = part({ supplierPartNumber: "DIP", price: "$0.90", description: "IC OPAMP JFET 4 CIRCUIT 14DIP", manufacturerPartNumber: "TL074CN" });
+  const ranked = rankCandidates(dipLine(), [soic, dip]);
+  assert.equal(ranked[0].part.supplierPartNumber, "DIP");
+  assert.equal(ranked[0].pkg.status, "match");
+  assert.equal(ranked[1].pkg.status, "mismatch");
+  assert.equal(defaultCandidateIndex(ranked), 0);
+});
+
+test("an unconfirmed package ranks between a match and a mismatch", () => {
+  const soic = part({ supplierPartNumber: "SOIC", price: "$0.10", description: "TL074 14SOIC", manufacturerPartNumber: "TL074CDR" });
+  const unknown = part({ supplierPartNumber: "UNK", price: "$0.50", description: "Op Amps Quad JFET", manufacturerPartNumber: "TL074CN" });
+  const ranked = rankCandidates(dipLine(), [soic, unknown]);
+  assert.deepEqual(ranked.map((c) => c.pkg.status), ["unknown", "mismatch"]);
+});
+
+test("when every candidate is the wrong package, nothing is picked by default", () => {
+  const soic = part({ supplierPartNumber: "SOIC", description: "TL074 14SOIC", manufacturerPartNumber: "TL074CDR" });
+  const tssop = part({ supplierPartNumber: "TSSOP", description: "TL074 14TSSOP", manufacturerPartNumber: "TL074CPWR" });
+  const ranked = rankCandidates(dipLine(), [soic, tssop]);
+  assert.equal(defaultCandidateIndex(ranked), null);
+});
+
+test("the right value still outranks the right package on a different part", () => {
+  const rightChipWrongPkg = part({ supplierPartNumber: "TL074-SOIC", description: "TL074 14SOIC", manufacturerPartNumber: "TL074CDR" });
+  const otherChipDip = part({ supplierPartNumber: "LM324-DIP", description: "LM324 14DIP", manufacturerPartNumber: "LM324N" });
+  const ranked = rankCandidates(dipLine(), [otherChipDip, rightChipWrongPkg]);
+  assert.equal(ranked[0].part.supplierPartNumber, "TL074-SOIC");
+  assert.equal(ranked[0].confidence, "exact");
+  assert.equal(defaultCandidateIndex(ranked), null, "and it is still not picked silently");
+});
+
+test("with no package in the BOM, ranking is unchanged and nothing is flagged as a mismatch", () => {
+  const soic = part({ supplierPartNumber: "SOIC", price: "$0.40", description: "TL074 14SOIC", manufacturerPartNumber: "TL074CDR" });
+  const dip = part({ supplierPartNumber: "DIP", price: "$0.90", description: "TL074 14DIP", manufacturerPartNumber: "TL074CN" });
+  const ranked = rankCandidates(line({ kind: "ic", value: "TL074" }), [dip, soic]);
+  assert.equal(ranked[0].part.supplierPartNumber, "SOIC");
+  assert.deepEqual(ranked.map((c) => c.pkg.status), ["unspecified", "unspecified"]);
+  assert.equal(ranked[0].pkg.found, "SOIC-14");
 });

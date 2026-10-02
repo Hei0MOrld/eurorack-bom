@@ -7,6 +7,8 @@
 // part must be inferred from free-text words in the Description column
 // instead (e.g. "Resistor 1/4W", "Op Amp", "Mono Jack", "Toggle Switch").
 
+import { packageRequirement, type PackageSpec } from "./package.ts";
+
 export type ComponentKind =
   | "resistor"
   | "capacitor"
@@ -26,6 +28,10 @@ export interface ParsedBomLine {
   value: string;
   quantity: number;
   note: string;
+  // Acceptable packages stated anywhere in the row (Value, Note or
+  // Description), e.g. "SOIC-14 or TSSOP-14" -> two options, "SMD" -> a
+  // mounting-only option. Empty when the BOM doesn't say.
+  packageRequirement: PackageSpec[];
 }
 
 // Ordered description -> kind rules. Order matters: IC sub-types that
@@ -104,6 +110,7 @@ export function parseBomText(text: string): ParsedBomLine[] {
       value,
       quantity,
       note,
+      packageRequirement: packageRequirement([value, note, description]),
     });
   }
 

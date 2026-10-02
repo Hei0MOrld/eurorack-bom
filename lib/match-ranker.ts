@@ -2,11 +2,20 @@ import type { ParsedBomLine } from "./bom-parser.ts";
 import type { SupplierPart } from "./supplier-types.ts";
 import { parseResistanceOhms, parseCapacitanceFarads } from "./value-normalizer.ts";
 import { firstAlternateValue } from "./query-builder.ts";
+import { checkPackage, type PackageCheck } from "./package.ts";
 
 export interface RankedCandidate {
   part: SupplierPart;
+  // How well the part's VALUE matches (resistance, capacitance, part number).
   confidence: "exact" | "possible" | "unknown";
+  // Whether the part's PACKAGE matches what the BOM line asks for — a
+  // separate question, so "exact" no longer silently covers a wrong
+  // footprint (TL074 in SOIC-14 when the BOM said DIP-14).
+  pkg: PackageCheck;
 }
+
+// Value ranking below runs first, without package information.
+type ValueRanked = Omit<RankedCandidate, "pkg">;
 
 // Same extraction/tie-break helpers smart-bom's pedal-BOM ranker uses —
 // duplicated rather than shared across the two small projects (per-project
@@ -55,11 +64,11 @@ function parsePrice(price: string): number {
 // Same placeholder-never-wins fix smart-bom's pedal-BOM ranker needed — a
 // supplier client with no live credentials returns a "MOCK-..." part priced
 // at $0.00, which would otherwise always win a price tiebreak.
-function isPlaceholder(candidate: RankedCandidate): boolean {
+function isPlaceholder(candidate: ValueRanked): boolean {
   return candidate.part.supplierPartNumber.startsWith("MOCK");
 }
 
-function byConfidenceThenPrice(a: RankedCandidate, b: RankedCandidate): number {
+function byConfidenceThenPrice(a: ValueRanked, b: ValueRanked): number {
   const aPlaceholder = isPlaceholder(a);
   const bPlaceholder = isPlaceholder(b);
   if (aPlaceholder !== bPlaceholder) return aPlaceholder ? 1 : -1;
@@ -74,10 +83,10 @@ function scoreByExtractedValue(
   candidates: SupplierPart[],
   target: number | null,
   extract: (description: string) => number | null,
-): RankedCandidate[] {
+): ValueRanked[] {
   const scored = candidates.map((part) => {
     const extracted = extract(part.description);
-    let confidence: RankedCandidate["confidence"] = "unknown";
+    let confidence: ValueRanked["confidence"] = "unknown";
     if (target !== null && extracted !== null) {
       confidence = nearlyEqual(target, extracted) ? "exact" : "possible";
     } else if (extracted !== null) {
@@ -88,9 +97,9 @@ function scoreByExtractedValue(
   return scored.sort(byConfidenceThenPrice);
 }
 
-function scoreBySubstring(candidates: SupplierPart[], needle: string): RankedCandidate[] {
+function scoreBySubstring(candidates: SupplierPart[], needle: string): ValueRanked[] {
   const cleanNeedle = needle.toLowerCase().replace(/\s+/g, "");
-  const scored: RankedCandidate[] = candidates.map((part) => {
+  const scored: ValueRanked[] = candidates.map((part) => {
     const haystack = (part.manufacturerPartNumber + " " + part.description)
       .toLowerCase()
       .replace(/\s+/g, "");
@@ -99,7 +108,44 @@ function scoreBySubstring(candidates: SupplierPart[], needle: string): RankedCan
   return scored.sort(byConfidenceThenPrice);
 }
 
+// Value first, then package, then price. Value outranks package on
+// purpose: a different chip in the right package is a worse pick than the
+// right chip whose package couldn't be confirmed. Within the same value
+// confidence, a confirmed package match beats an unconfirmed one, and a
+// confirmed mismatch goes last.
+const PACKAGE_ORDER: Record<PackageCheck["status"], number> = {
+  match: 0,
+  unspecified: 0,
+  unknown: 1,
+  mismatch: 2,
+};
+const CONFIDENCE_ORDER: Record<RankedCandidate["confidence"], number> = { exact: 0, possible: 1, unknown: 2 };
+
 export function rankCandidates(line: ParsedBomLine, candidates: SupplierPart[]): RankedCandidate[] {
+  const requirement = line.packageRequirement ?? [];
+  return rankByValue(line, candidates)
+    .map((c) => ({ ...c, pkg: checkPackage(requirement, c.part) }))
+    .sort((a, b) => {
+      const aPlaceholder = isPlaceholder(a);
+      const bPlaceholder = isPlaceholder(b);
+      if (aPlaceholder !== bPlaceholder) return aPlaceholder ? 1 : -1;
+      const byValue = CONFIDENCE_ORDER[a.confidence] - CONFIDENCE_ORDER[b.confidence];
+      if (byValue !== 0) return byValue;
+      const byPackage = PACKAGE_ORDER[a.pkg.status] - PACKAGE_ORDER[b.pkg.status];
+      if (byPackage !== 0) return byPackage;
+      return parsePrice(a.part.price) - parsePrice(b.part.price);
+    });
+}
+
+// The index of the candidate the page should pick by default, or null when
+// even the best candidate is a confirmed package mismatch — then nothing is
+// picked silently and the line is flagged instead.
+export function defaultCandidateIndex(ranked: RankedCandidate[]): number | null {
+  if (ranked.length === 0) return null;
+  return ranked[0].pkg.status === "mismatch" ? null : 0;
+}
+
+function rankByValue(line: ParsedBomLine, candidates: SupplierPart[]): ValueRanked[] {
   if (line.kind === "resistor") {
     const target = parseResistanceOhms(line.value);
     return scoreByExtractedValue(candidates, target, extractResistanceOhms);
